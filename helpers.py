@@ -53,46 +53,6 @@ def load_state_dict(model,path):
 
 EPS = 1e-8
 
-class WeightedAsymmetricLoss(nn.Module):
-    def __init__(self, eps=1e-8, disable_torch_grad=True, weight=None):
-        super(WeightedAsymmetricLoss, self).__init__()
-        self.disable_torch_grad = disable_torch_grad
-        self.eps = eps
-        self.weight = weight
-
-    def forward(self, x, y, mask):
-
-        xs_pos = x
-        xs_neg = 1 - x
-
-        # Basic CE calculation
-        los_pos = y * torch.log(xs_pos.clamp(min=self.eps))
-        los_neg = (1 - y) * torch.log(xs_neg.clamp(min=self.eps))
-
-        # Asymmetric Focusing
-        if self.disable_torch_grad:
-            torch.set_grad_enabled(False)
-        neg_weight = 1 - xs_neg
-        if self.disable_torch_grad:
-            torch.set_grad_enabled(True)
-        loss = los_pos + neg_weight * los_neg
-
-        if self.weight is not None:
-            loss = loss * self.weight.view(1,-1)
-
-        loss = loss.mean(dim=-1)
-        loss = loss * mask
-        return -loss.sum() / (mask.sum() + EPS)
-
-class RegressionLoss(nn.Module):
-    def __init__(self):
-        super(RegressionLoss, self).__init__() 
-        self.loss = MaskNegativeCCCLoss()
-
-    def forward(self, x, y, mask):
-        loss1 = self.loss(x[:, 0], y[:, 0], mask) + self.loss(x[:, 1], y[:, 1], mask)
-        return loss1
-
 class MaskedCELoss(nn.Module):
     def __init__(self, weight=None, ignore_index=-1):
         super(MaskedCELoss, self).__init__() 
@@ -103,33 +63,6 @@ class MaskedCELoss(nn.Module):
         loss = loss.mean(dim=-1)
         loss = loss * mask
         return loss.sum() / (mask.sum() + EPS)
-
-class MaskNegativeCCCLoss(nn.Module):
-    def __init__(self):
-        super(MaskNegativeCCCLoss, self).__init__()
-    def forward(self, x, y, m):
-        y = y.view(-1)
-        x = x.view(-1)
-        x = x * m
-        y = y * m
-        N = torch.sum(m)
-        x_m = torch.sum(x) / N
-        y_m = torch.sum(x) / N
-        vx = (x - x_m) * m
-        vy = (y - y_m) * m
-        ccc = 2*torch.dot(vx, vy) / (torch.dot(vx, vx) + torch.dot(vy, vy) + N * torch.pow(x_m - y_m, 2) + EPS)
-        return 1-ccc
-
-def CCC_score(x, y):
-    vx = x - np.mean(x)
-    vy = y - np.mean(y)
-    rho = np.sum(vx * vy) / (np.sqrt(np.sum(vx**2)) * np.sqrt(np.sum(vy**2)))
-    x_m = np.mean(x)
-    y_m = np.mean(y)
-    x_s = np.std(x)
-    y_s = np.std(y)
-    ccc = 2*rho*x_s*y_s/(x_s**2 + y_s**2 + (x_m - y_m)**2)
-    return ccc
 
 def EX_metric(y, yhat):
     i = np.argmax(yhat, axis=1)
@@ -148,33 +81,3 @@ def EX_metric(y, yhat):
             yhat = np.argmax(yhat, axis=-1)
 
     return f1_score(y, yhat, average='macro')
-
-
-def VA_metric(y, yhat):
-    avg_ccc = float(CCC_score(y[:,0], yhat[:,0]) + CCC_score(y[:,1], yhat[:,1])) / 2
-    return avg_ccc
-
-
-def AU_metric(y, yhat, thresh=0.5):
-    yhat = (yhat >= thresh)
-    N, label_size = y.shape
-    f1s = []
-    for i in range(label_size):
-        f1 = f1_score(y[:, i], yhat[:, i])
-        f1s.append(f1)
-    return np.mean(f1s)
-
-class SparseCategoricalCELoss(nn.Module):
-    def __init__(self, num_classes, weight=None):
-        super(SparseCategoricalCELoss, self).__init__()
-        self.class_weight = weight
-        self.num_classes = num_classes
-
-    def forward(self, x, y, mask):
-        o = F.one_hot(y, num_classes=self.num_classes)
-        x = x / torch.sum(x, 1, keepdim=True)
-        loss = torch.sum(o * -torch.log(x + EPS), axis=-1, keepdims=False)
-        weight_mask = torch.gather(self.class_weight, 0, y)
-        loss = loss * mask * weight_mask
-        loss = loss.sum() / (mask.sum() + EPS)
-        return loss
