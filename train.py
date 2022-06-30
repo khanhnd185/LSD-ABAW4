@@ -1,11 +1,11 @@
 import os
 import pickle
 import pandas as pd
-from dataset import LSD
+from dataset import LSD, RawLSD
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from helpers import *
-from block import Dense
+from block import Dense, AFER
 import torch.optim as optim
 import argparse
 
@@ -23,17 +23,13 @@ def train(net, trainldr, optimizer, epoch, criteria):
     train_loader_len = len(trainldr)
     yhat = {}
     for batch_idx, (inputs, y) in enumerate(tqdm(trainldr)):
-        mask = torch.ones(inputs.shape[0])
-        mask = mask.float()
-        mask = mask.cuda()
         adjust_learning_rate(optimizer, epoch, epochs, learning_rate, batch_idx, train_loader_len)
         y = y.long()
-        if torch.cuda.is_available():
-            inputs = inputs.cuda()
-            y = y.cuda()
+        inputs = inputs.cuda()
+        y = y.cuda()
         optimizer.zero_grad()
         yhat = net(inputs)
-        loss = criteria(yhat, y, mask)
+        loss = criteria(yhat, y)
         loss.backward()
         optimizer.step()
         total_losses.update(loss.data.item(), inputs.size(0))
@@ -47,16 +43,12 @@ def val(net, validldr, criteria):
     all_y = None
     all_yhat = None
     for batch_idx, (inputs, y) in enumerate(tqdm(validldr)):
-        mask = torch.ones(inputs.shape[0])
-        mask = mask.float()
-        mask = mask.cuda()
         with torch.no_grad():
             y = y.long()
-            if torch.cuda.is_available():
-                inputs = inputs.cuda()
-                y = y.cuda()
+            inputs = inputs.cuda()
+            y = y.cuda()
             yhat = net(inputs)
-            loss = criteria(yhat, y, mask)
+            loss = criteria(yhat, y)
             total_losses.update(loss.data.item(), inputs.size(0))
 
             if all_y == None:
@@ -72,19 +64,25 @@ def val(net, validldr, criteria):
 
 
 def main():
-    output_dir = 'train'
+    net_name = 'AFER'
+    output_dir = net_name
 
     train_file = os.path.join(DATA_DIR, 'training.txt')
     valid_file = os.path.join(DATA_DIR, 'validation.txt')
 
-    with open(os.path.join(DATA_DIR, 'lsd_train_enet_b0_8_best_vgaf.pickle'), 'rb') as handle:
-        train_feature=pickle.load(handle)
-    with open(os.path.join(DATA_DIR, 'lsd_valid_enet_b0_8_best_vgaf.pickle'), 'rb') as handle:
-        valid_feature=pickle.load(handle)
 
-    trainset = LSD(train_file, train_feature)
+    if net_name == 'AFER':
+        trainset = RawLSD(train_file, DATA_DIR + 'training')
+        validset = RawLSD(valid_file, DATA_DIR + 'validation')
+    else:
+        with open(os.path.join(DATA_DIR, 'lsd_train_enet_b0_8_best_vgaf.pickle'), 'rb') as handle:
+            train_feature=pickle.load(handle)
+        with open(os.path.join(DATA_DIR, 'lsd_valid_enet_b0_8_best_vgaf.pickle'), 'rb') as handle:
+            valid_feature=pickle.load(handle)
+        trainset = LSD(train_file, train_feature)
+        validset = LSD(valid_file, valid_feature)
+
     trainldr = DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    validset = LSD(valid_file, valid_feature)
     validldr = DataLoader(validset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     trainexw = torch.from_numpy(trainset.ex_weight())
     validexw = torch.from_numpy(validset.ex_weight())
@@ -92,19 +90,21 @@ def main():
     validexw = validexw.float()
 
     start_epoch = 0
-    net = Dense(1288, 6, activation='softmax')
+    if net_name == 'AFER':
+        net = AFER()
+    else:
+        net = Dense(1288, 6, activation='softmax')
 
     if resume != '':
         print("Resume form | {} ]".format(resume))
         net = load_state_dict(net, resume)
 
-    if torch.cuda.is_available():
-        net = nn.DataParallel(net).cuda()
-        trainexw = trainexw.cuda()
-        validexw = validexw.cuda()
+    net = nn.DataParallel(net).cuda()
+    trainexw = trainexw.cuda()
+    validexw = validexw.cuda()
 
-    train_criteria = MaskedCELoss(weight=trainexw, ignore_index=-1)
-    valid_criteria = MaskedCELoss(weight=validexw, ignore_index=-1)
+    train_criteria = nn.CrossEntropyLoss(reduction='mean', weight=trainexw, ignore_index=-1)
+    valid_criteria = nn.CrossEntropyLoss(reduction='mean', weight=validexw, ignore_index=-1)
 
     optimizer = optim.AdamW(net.parameters(), betas=(0.9, 0.999), lr=learning_rate, weight_decay=1.0/batch_size)
     best_performance = 0.0
